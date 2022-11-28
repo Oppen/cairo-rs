@@ -2,9 +2,9 @@ use crate::{
     bigint, relocatable,
     vm::errors::{memory_errors::MemoryError, vm_errors::VirtualMachineError},
 };
-use num_bigint::BigInt;
+use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
-use num_traits::{FromPrimitive, Signed, ToPrimitive};
+use num_traits::{Signed, ToPrimitive};
 use std::ops::Add;
 
 #[derive(Eq, Hash, PartialEq, PartialOrd, Clone, Debug)]
@@ -349,19 +349,44 @@ impl<'a> Add<usize> for &'a Relocatable {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct RelocatedValue {
+    pub(crate) words: [u64; 4],
+}
+
 /// Turns a MaybeRelocatable into a BigInt value.
 /// If the value is an Int, it will extract the BigInt value from it.
 /// If the value is Relocatable, it will return an error since it should've already been relocated.
 pub fn relocate_value(
     value: MaybeRelocatable,
     relocation_table: &Vec<usize>,
-) -> Result<BigInt, MemoryError> {
+) -> Result<RelocatedValue, MemoryError> {
     match value {
-        MaybeRelocatable::Int(num) => Ok(num),
-        MaybeRelocatable::RelocatableValue(relocatable) => {
-            BigInt::from_usize(relocate_address(relocatable, relocation_table)?)
-                .ok_or(MemoryError::Relocation)
+        MaybeRelocatable::Int(ref num) => {
+            if matches!(num.sign(), Sign::Minus) {
+                return Err(MemoryError::Relocation);
+            }
+            if num.bits() > 256 {
+                return Err(MemoryError::Relocation);
+            }
+            let mut words = num.iter_u64_digits();
+            Ok(RelocatedValue {
+                words: [
+                    words.next().unwrap_or(0),
+                    words.next().unwrap_or(0),
+                    words.next().unwrap_or(0),
+                    words.next().unwrap_or(0),
+                ],
+            })
         }
+        MaybeRelocatable::RelocatableValue(relocatable) => Ok(RelocatedValue {
+            words: [
+                relocate_address(relocatable, relocation_table)? as u64,
+                0,
+                0,
+                0,
+            ],
+        }),
     }
 }
 

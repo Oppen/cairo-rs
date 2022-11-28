@@ -13,7 +13,9 @@ use crate::{
         instruction::Register,
         layout::CairoLayout,
         program::Program,
-        relocatable::{relocate_address, relocate_value, MaybeRelocatable, Relocatable},
+        relocatable::{
+            relocate_address, relocate_value, MaybeRelocatable, Relocatable, RelocatedValue,
+        },
     },
     utils::{is_subsequence, to_field_element},
     vm::{
@@ -56,7 +58,7 @@ pub struct CairoRunner {
     execution_public_memory: Option<Vec<usize>>,
     proof_mode: bool,
     pub original_steps: Option<usize>,
-    pub relocated_memory: Vec<Option<BigInt>>,
+    pub relocated_memory: Vec<Option<RelocatedValue>>,
     pub relocated_trace: Option<Vec<RelocatedTraceEntry>>,
     pub exec_scopes: ExecutionScopes,
 }

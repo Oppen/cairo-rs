@@ -1,10 +1,10 @@
 use crate::hint_processor::hint_processor_definition::HintProcessor;
 use crate::types::program::Program;
+use crate::types::relocatable::RelocatedValue;
 use crate::vm::errors::{cairo_run_errors::CairoRunError, runner_errors::RunnerError};
 use crate::vm::runners::cairo_runner::CairoRunner;
 use crate::vm::trace::trace_entry::RelocatedTraceEntry;
 use crate::vm::vm_core::VirtualMachine;
-use num_bigint::BigInt;
 use std::fs::File;
 use std::io::{self, BufWriter, Error, ErrorKind, Write};
 use std::path::Path;
@@ -87,38 +87,26 @@ pub fn write_binary_trace(
    * value -> 32-byte encoded
 */
 pub fn write_binary_memory(
-    relocated_memory: &[Option<BigInt>],
+    relocated_memory: &[Option<RelocatedValue>],
     memory_file: &Path,
 ) -> io::Result<()> {
     let file = File::create(memory_file)?;
     let mut buffer = BufWriter::new(file);
 
-    // initialize bytes vector that will be dumped to file
-    let mut memory_bytes: Vec<u8> = Vec::new();
-
     for (i, memory_cell) in relocated_memory.iter().enumerate() {
         match memory_cell {
             None => continue,
-            Some(unwrapped_memory_cell) => {
-                encode_relocated_memory(&mut memory_bytes, i, unwrapped_memory_cell);
+            Some(memory_cell) => {
+                buffer.write_all(&(i as u64).to_le_bytes())?;
+                buffer.write_all(&memory_cell.words[0].to_le_bytes())?;
+                buffer.write_all(&memory_cell.words[1].to_le_bytes())?;
+                buffer.write_all(&memory_cell.words[2].to_le_bytes())?;
+                buffer.write_all(&memory_cell.words[3].to_le_bytes())?;
             }
         }
     }
 
-    buffer.write_all(&memory_bytes)?;
     buffer.flush()
-}
-
-// encodes a given memory cell.
-fn encode_relocated_memory(memory_bytes: &mut Vec<u8>, addr: usize, memory_cell: &BigInt) {
-    // append memory address to bytes vector using a 8 bytes representation
-    let mut addr_bytes = (addr as u64).to_le_bytes().to_vec();
-    memory_bytes.append(&mut addr_bytes);
-
-    // append memory value at address using a 32 bytes representation
-    let mut value_bytes = memory_cell.to_signed_bytes_le();
-    value_bytes.resize(32, 0);
-    memory_bytes.append(&mut value_bytes);
 }
 
 #[cfg(test)]
