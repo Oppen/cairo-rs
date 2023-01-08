@@ -22,7 +22,7 @@ use crate::{
         },
         security::verify_secure_runner,
         trace::get_perm_range_check_limits,
-        vm_memory::memory::RelocateValue,
+        vm_memory::memory::MaybeAccessed,
         {
             runners::builtin_runner::{
                 BitwiseBuiltinRunner, BuiltinRunner, EcOpBuiltinRunner, HashBuiltinRunner,
@@ -415,18 +415,11 @@ impl CairoRunner {
             builtin.add_validation_rule(&mut vm.memory)?;
         }
 
-        // Mark all addresses from the program segment as accessed
-        let prog_segment_index = self
-            .program_base
-            .as_ref()
-            .unwrap_or(&Relocatable::from((0, 0)))
-            .segment_index;
-
-        let initial_accessed_addresses = (0..self.program.data.len())
-            .map(|offset| Relocatable::from((prog_segment_index, offset)))
-            .collect();
-
-        vm.accessed_addresses = Some(initial_accessed_addresses);
+        for offset in 0..self.program.data.len() {
+            vm.memory
+                .mark_as_accessed(Relocatable::from((0, offset)))
+                .map_err(RunnerError::MemoryValidationError)?;
+        }
 
         vm.memory
             .validate_existing_memory()
@@ -616,32 +609,19 @@ impl CairoRunner {
     }
 
     /// Count the number of holes present in the segments.
-    pub fn get_memory_holes(&self, vm: &VirtualMachine) -> Result<usize, MemoryError> {
-        let program_addresses =
-            (0..self.program.data.len()).map(|offset| Relocatable::from((0, offset)));
-
-        let accessed_addresses = vm
-            .accessed_addresses
-            .as_ref()
-            .ok_or(MemoryError::MissingAccessedAddresses)?
-            .iter()
-            .map(|addr| vm.memory.relocate_value(*addr));
-
-        let builtin_addresses = vm
+    pub fn get_memory_holes(&self, vm: &mut VirtualMachine) -> Result<usize, MemoryError> {
+        let ranges: Vec<_> = vm
             .builtin_runners
             .iter()
             .map(|(_, runner)| runner.base())
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flat_map(|base| {
-                let size = vm.segments.get_segment_size(base as usize).unwrap();
-                (0..size).map(move |offset| Relocatable::from((base, offset)))
-            });
+            .map(|base| (base, vm.segments.get_segment_size(base as usize).unwrap()))
+            .collect();
 
-        let addresses = program_addresses
-            .chain(accessed_addresses)
-            .chain(builtin_addresses);
-        vm.segments.get_memory_holes(addresses)
+        for (base, len) in ranges {
+            vm.mark_address_range_as_accessed(Relocatable::from((base, 0)), len)
+                .map_err(|_| MemoryError::InsufficientAllocatedCells)?;
+        }
+        vm.segments.get_memory_holes(&vm.memory)
     }
 
     /// Check if there are enough trace cells to fill the entire diluted checks.
@@ -736,7 +716,7 @@ impl CairoRunner {
         for (index, segment) in vm.memory.data.iter().enumerate() {
             for (seg_offset, element) in segment.iter().enumerate() {
                 match element {
-                    Some(elem) => {
+                    Some(MaybeAccessed::Hole(elem)) | Some(MaybeAccessed::Accessed(elem)) => {
                         let relocated_addr = relocate_address(
                             Relocatable::from((index as isize, seg_offset)),
                             relocation_table,
@@ -817,7 +797,7 @@ impl CairoRunner {
 
     pub fn get_execution_resources(
         &self,
-        vm: &VirtualMachine,
+        vm: &mut VirtualMachine,
     ) -> Result<ExecutionResources, TraceError> {
         let n_steps = match self.original_steps {
             Some(x) => x,
@@ -979,7 +959,7 @@ impl CairoRunner {
 
     // Returns Ok(()) if there are enough allocated cells for the builtins.
     // If not, the number of steps should be increased or a different layout should be used.
-    pub fn check_used_cells(&self, vm: &VirtualMachine) -> Result<(), VirtualMachineError> {
+    pub fn check_used_cells(&self, vm: &mut VirtualMachine) -> Result<(), VirtualMachineError> {
         vm.builtin_runners
             .iter()
             .map(|(_builtin_runner_name, builtin_runner)| {
@@ -993,7 +973,7 @@ impl CairoRunner {
     }
 
     // Checks that there are enough trace cells to fill the entire memory range.
-    pub fn check_memory_usage(&self, vm: &VirtualMachine) -> Result<(), VirtualMachineError> {
+    pub fn check_memory_usage(&self, vm: &mut VirtualMachine) -> Result<(), VirtualMachineError> {
         let instance = &self.layout;
 
         let builtins_memory_units: usize = vm

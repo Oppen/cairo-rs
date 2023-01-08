@@ -8,7 +8,7 @@ use crate::{
         errors::{memory_errors::MemoryError, runner_errors::RunnerError},
         vm_core::VirtualMachine,
         vm_memory::{
-            memory::{Memory, ValidationRule},
+            memory::{MaybeAccessed, Memory, ValidationRule},
             memory_segments::MemorySegmentManager,
         },
     },
@@ -167,6 +167,12 @@ impl RangeCheckBuiltinRunner {
         let range_check_segment = memory.data.get(self.base as usize)?;
         let inner_rc_bound = Felt::new(self.inner_rc_bound);
         for value in range_check_segment {
+            let value = match value {
+                Some(MaybeAccessed::Hole(ref value)) | Some(MaybeAccessed::Accessed(ref value)) => {
+                    Some(value)
+                }
+                None => None,
+            };
             //Split val into n_parts parts.
             for _ in 0..self.n_parts {
                 let part_val = value

@@ -3,7 +3,7 @@ use crate::vm::errors::memory_errors::{self, MemoryError};
 use crate::vm::errors::runner_errors::RunnerError;
 use crate::vm::errors::vm_errors::VirtualMachineError;
 use crate::vm::vm_core::VirtualMachine;
-use crate::vm::vm_memory::memory::Memory;
+use crate::vm::vm_memory::memory::{MaybeAccessed, Memory};
 use crate::vm::vm_memory::memory_segments::MemorySegmentManager;
 
 mod bitwise;
@@ -284,7 +284,10 @@ impl BuiltinRunner {
             .iter()
             .enumerate()
             .filter_map(|(offset, value)| match value {
-                Some(MaybeRelocatable::RelocatableValue(_)) => Some(offset),
+                Some(MaybeAccessed::Hole(MaybeRelocatable::RelocatableValue(_)))
+                | Some(MaybeAccessed::Accessed(MaybeRelocatable::RelocatableValue(_))) => {
+                    Some(offset)
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();

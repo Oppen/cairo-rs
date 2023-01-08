@@ -17,7 +17,10 @@ use crate::{
         },
         runners::builtin_runner::{BuiltinRunner, RangeCheckBuiltinRunner, SignatureBuiltinRunner},
         trace::trace_entry::TraceEntry,
-        vm_memory::{memory::Memory, memory_segments::MemorySegmentManager},
+        vm_memory::{
+            memory::{MaybeAccessed, Memory},
+            memory_segments::MemorySegmentManager,
+        },
     },
 };
 use felt::Felt;
@@ -80,7 +83,6 @@ pub struct VirtualMachine {
     pub(crate) segments: MemorySegmentManager,
     pub(crate) _program_base: Option<MaybeRelocatable>,
     pub(crate) memory: Memory,
-    pub(crate) accessed_addresses: Option<Vec<Relocatable>>,
     pub(crate) trace: Option<Vec<TraceEntry>>,
     pub(crate) current_step: usize,
     pub(crate) error_message_attributes: Vec<Attribute>,
@@ -123,7 +125,6 @@ impl VirtualMachine {
             memory: Memory::new(),
             // We had to change this from None to this Some because when calling run_from_entrypoint from cairo-rs-py
             // we could not change this value and faced an Error. This is the behaviour that the original VM implements also.
-            accessed_addresses: Some(Vec::new()),
             trace,
             current_step: 0,
             skip_instruction_execution: false,
@@ -462,11 +463,10 @@ impl VirtualMachine {
             });
         }
 
-        if let Some(ref mut accessed_addresses) = self.accessed_addresses {
-            let op_addrs = operands_addresses;
-            let addresses = [op_addrs.dst_addr, op_addrs.op0_addr, op_addrs.op1_addr];
-            accessed_addresses.extend(addresses.into_iter());
-        }
+        let op_addrs = operands_addresses;
+        self.memory.mark_as_accessed(op_addrs.dst_addr)?;
+        self.memory.mark_as_accessed(op_addrs.op0_addr)?;
+        self.memory.mark_as_accessed(op_addrs.dst_addr)?;
 
         self.update_registers(instruction, operands)?;
         self.current_step += 1;
@@ -681,17 +681,24 @@ impl VirtualMachine {
                 .base()
                 .try_into()
                 .map_err(|_| MemoryError::AddressInTemporarySegment(builtin.base()))?;
+            // TODO: segment iterator
             for (offset, value) in self.memory.data[index].iter().enumerate() {
                 if let Some(deduced_memory_cell) = builtin
                     .deduce_memory_cell(&Relocatable::from((index as isize, offset)), &self.memory)
                     .map_err(VirtualMachineError::RunnerError)?
                 {
-                    if Some(&deduced_memory_cell) != value.as_ref() && value != &None {
-                        return Err(VirtualMachineError::InconsistentAutoDeduction(
-                            name.to_owned(),
-                            deduced_memory_cell,
-                            value.to_owned(),
-                        ));
+                    match value {
+                        Some(MaybeAccessed::Hole(ref value))
+                        | Some(MaybeAccessed::Accessed(ref value))
+                            if *value != deduced_memory_cell =>
+                        {
+                            return Err(VirtualMachineError::InconsistentAutoDeduction(
+                                name.to_owned(),
+                                deduced_memory_cell,
+                                Some(value.to_owned()),
+                            ));
+                        }
+                        _ => continue,
                     }
                 }
             }
@@ -716,10 +723,11 @@ impl VirtualMachine {
         if !self.run_finished {
             return Err(VirtualMachineError::RunNotFinished);
         }
-        self.accessed_addresses
-            .as_mut()
-            .ok_or(VirtualMachineError::RunNotFinished)?
-            .extend((0..len).map(|i: usize| base + i));
+        for offset in 0..len {
+            self.memory
+                .mark_as_accessed(base + offset)
+                .map_err(|_| VirtualMachineError::RunNotFinished)?;
+        }
         Ok(())
     }
 

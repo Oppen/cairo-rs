@@ -4,6 +4,7 @@ use super::{
     },
     runners::cairo_runner::CairoRunner,
     vm_core::VirtualMachine,
+    vm_memory::memory::MaybeAccessed,
 };
 use crate::types::relocatable::Relocatable;
 use std::{collections::HashMap, mem::swap};
@@ -65,6 +66,10 @@ pub fn verify_secure_runner(
         {
             return Err(RunnerError::FailedMemoryGet(MemoryError::NumOutOfBounds).into());
         }
+
+        let value = match value {
+            MaybeAccessed::Hole(ref value) | MaybeAccessed::Accessed(ref value) => value,
+        };
 
         // Check value validity (when relocatable, that the segment exists and
         // is not temporary).

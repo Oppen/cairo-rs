@@ -1,17 +1,14 @@
 use crate::{
     types::relocatable::{MaybeRelocatable, Relocatable},
-    utils::from_relocatable_to_indexes,
     vm::{
-        errors::memory_errors::MemoryError, errors::vm_errors::VirtualMachineError,
-        vm_core::VirtualMachine, vm_memory::memory::Memory,
+        errors::memory_errors::MemoryError,
+        errors::vm_errors::VirtualMachineError,
+        vm_core::VirtualMachine,
+        vm_memory::memory::{MaybeAccessed, Memory},
     },
 };
 
-use std::{
-    any::Any,
-    cmp,
-    collections::{HashMap, HashSet},
-};
+use std::{any::Any, cmp, collections::HashMap};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct MemorySegmentManager {
@@ -191,42 +188,25 @@ impl MemorySegmentManager {
         }
     }
 
-    pub fn get_memory_holes(
-        &self,
-        accessed_addresses: impl Iterator<Item = Relocatable>,
-    ) -> Result<usize, MemoryError> {
+    pub fn get_memory_holes(&self, memory: &Memory) -> Result<usize, MemoryError> {
         let segment_used_sizes = self
             .segment_used_sizes
             .as_ref()
             .ok_or(MemoryError::MissingSegmentUsedSizes)?;
 
-        let mut accessed_offsets_sets = HashMap::new();
-        for addr in accessed_addresses {
-            let (index, offset) = from_relocatable_to_indexes(&addr);
-            let (segment_size, offset_set) = match accessed_offsets_sets.get_mut(&index) {
-                Some(x) => x,
-                None => {
-                    let segment_size = self
-                        .get_segment_size(index)
-                        .ok_or(MemoryError::SegmentNotFinalized(index))?;
-
-                    accessed_offsets_sets.insert(index, (segment_size, HashSet::new()));
-                    accessed_offsets_sets
-                        .get_mut(&index)
-                        .ok_or(MemoryError::CantGetMutAccessedOffset)?
-                }
-            };
-            if offset > *segment_size {
-                return Err(MemoryError::NumOutOfBounds);
-            }
-
-            offset_set.insert(offset);
-        }
-
         let max = cmp::max(self.segment_sizes.len(), segment_used_sizes.len());
         Ok((0..max)
-            .filter_map(|index| accessed_offsets_sets.get(&index))
-            .map(|(segment_size, offsets_set)| segment_size - offsets_set.len())
+            .filter_map(|index| {
+                let segment = memory.data.get(index)?;
+                Some((
+                    self.get_segment_size(index)?,
+                    segment
+                        .iter()
+                        .filter(|v| matches!(v, Some(MaybeAccessed::Accessed(_))))
+                        .count(),
+                ))
+            })
+            .map(|(segment_size, offsets_set)| segment_size - offsets_set)
             .sum())
     }
 

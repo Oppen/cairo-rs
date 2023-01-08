@@ -7,7 +7,7 @@ use felt::Felt;
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
-    mem::swap,
+    mem::{replace, swap},
 };
 
 pub struct ValidationRule(
@@ -15,9 +15,17 @@ pub struct ValidationRule(
     pub  Box<dyn Fn(&Memory, &MaybeRelocatable) -> Result<Vec<MaybeRelocatable>, MemoryError>>,
 );
 
+// TODO: maybe I can assume Validated => Accessed and encode it too?
+// TODO: it'll be easier to work with if made Deref
+#[derive(Eq, Hash, PartialEq, PartialOrd, Clone, Debug)]
+pub(crate) enum MaybeAccessed {
+    Accessed(MaybeRelocatable),
+    Hole(MaybeRelocatable),
+}
+
 pub struct Memory {
-    pub data: Vec<Vec<Option<MaybeRelocatable>>>,
-    pub temp_data: Vec<Vec<Option<MaybeRelocatable>>>,
+    pub(crate) data: Vec<Vec<Option<MaybeAccessed>>>,
+    pub(crate) temp_data: Vec<Vec<Option<MaybeAccessed>>>,
     // relocation_rules's keys map to temp_data's indices and therefore begin at
     // zero; that is, segment_index = -1 maps to key 0, -2 to key 1...
     pub(crate) relocation_rules: HashMap<usize, Relocatable>,
@@ -28,8 +36,8 @@ pub struct Memory {
 impl Memory {
     pub fn new() -> Memory {
         Memory {
-            data: Vec::<Vec<Option<MaybeRelocatable>>>::new(),
-            temp_data: Vec::<Vec<Option<MaybeRelocatable>>>::new(),
+            data: Vec::new(),
+            temp_data: Vec::new(),
             relocation_rules: HashMap::new(),
             validated_addresses: HashSet::<MaybeRelocatable>::new(),
             validation_rules: HashMap::new(),
@@ -47,7 +55,6 @@ impl Memory {
         let relocatable: Relocatable = key
             .try_into()
             .map_err(|_| MemoryError::AddressNotRelocatable)?;
-        let val = MaybeRelocatable::from(val);
         let (value_index, value_offset) = from_relocatable_to_indexes(&relocatable);
 
         let data = if relocatable.segment_index.is_negative() {
@@ -68,9 +75,11 @@ impl Memory {
         }
         // At this point there's *something* in there
 
+        let val = MaybeRelocatable::from(val);
         match segment[value_offset] {
-            None => segment[value_offset] = Some(val),
-            Some(ref current_value) => {
+            None => segment[value_offset] = Some(MaybeAccessed::Hole(val)),
+            Some(MaybeAccessed::Hole(ref current_value))
+            | Some(MaybeAccessed::Accessed(ref current_value)) => {
                 if current_value != &val {
                     //Existing memory cannot be changed
                     return Err(MemoryError::InconsistentMemory(
@@ -81,6 +90,7 @@ impl Memory {
                 }
             }
         };
+        // TODO: do only on actual changed value
         self.validate_memory_cell(&MaybeRelocatable::from(key))
     }
 
@@ -103,9 +113,13 @@ impl Memory {
         };
         let (i, j) = from_relocatable_to_indexes(&relocatable);
         if data.len() > i && data[i].len() > j {
-            if let Some(ref element) = data[i][j] {
-                return Ok(Some(self.relocate_value(element)));
-            }
+            match data[i][j] {
+                Some(MaybeAccessed::Hole(ref element))
+                | Some(MaybeAccessed::Accessed(ref element)) => {
+                    return Ok(Some(self.relocate_value(element)))
+                }
+                _ => (),
+            };
         }
 
         Ok(None)
@@ -158,15 +172,12 @@ impl Memory {
             }
 
             let value = match value {
-                Some(x) => x,
-                None => continue,
+                Some(MaybeAccessed::Hole(ref x)) | Some(MaybeAccessed::Accessed(ref x)) => x,
+                _ => continue,
             };
 
-            let new_addr: Relocatable = self
-                .relocate_value(&MaybeRelocatable::RelocatableValue(addr))
-                .into_owned()
-                .try_into()?;
-            let new_value = self.relocate_value(&value).into_owned();
+            let new_addr: Relocatable = self.relocate_value(addr);
+            let new_value = self.relocate_value(value).into_owned();
 
             if new_addr.segment_index as usize >= self.data.len() {
                 self.data
@@ -178,7 +189,7 @@ impl Memory {
                 segment_data.resize(new_addr.offset + 1, None);
             }
 
-            segment_data[new_addr.offset] = Some(new_value);
+            segment_data[new_addr.offset] = Some(MaybeAccessed::Hole(new_value));
         }
 
         self.relocation_rules.clear();
@@ -219,7 +230,10 @@ impl Memory {
     //Gets the value from memory address.
     //If the value is an MaybeRelocatable::Int(Bigint) return &Bigint
     //else raises Err
-    pub fn get_integer(&self, key: &Relocatable) -> Result<Cow<Felt>, VirtualMachineError> {
+    pub fn get_integer<'a, 'b>(
+        &'a self,
+        key: &'b Relocatable,
+    ) -> Result<Cow<'a, Felt>, VirtualMachineError> {
         match self.get(key).map_err(VirtualMachineError::MemoryError)? {
             Some(Cow::Borrowed(MaybeRelocatable::Int(int))) => Ok(Cow::Borrowed(int)),
             Some(Cow::Owned(MaybeRelocatable::Int(int))) => Ok(Cow::Owned(int)),
@@ -278,11 +292,27 @@ impl Memory {
         Ok(())
     }
 
-    pub fn get_range(
-        &self,
-        addr: &MaybeRelocatable,
+    pub(crate) fn mark_as_accessed(&mut self, addr: Relocatable) -> Result<(), MemoryError> {
+        let segment = self
+            .data
+            .get_mut(addr.segment_index as usize)
+            .ok_or(MemoryError::GetRangeMemoryGap)?;
+        let value = segment
+            .get_mut(addr.offset)
+            .ok_or(MemoryError::GetRangeMemoryGap)?;
+        if let Some(MaybeAccessed::Hole(ref mut hole)) = value {
+            let new_value = MaybeAccessed::Accessed(replace(hole, MaybeRelocatable::from((0, 0))));
+            *value = Some(new_value);
+            return Ok(());
+        }
+        Err(MemoryError::GetRangeMemoryGap)
+    }
+
+    pub fn get_range<'a, 'b>(
+        &'a self,
+        addr: &'b MaybeRelocatable,
         size: usize,
-    ) -> Result<Vec<Option<Cow<MaybeRelocatable>>>, MemoryError> {
+    ) -> Result<Vec<Option<Cow<'a, MaybeRelocatable>>>, MemoryError> {
         let mut values = Vec::new();
 
         for i in 0..size {
@@ -309,11 +339,11 @@ impl Memory {
         Ok(values)
     }
 
-    pub fn get_integer_range(
-        &self,
-        addr: &Relocatable,
+    pub fn get_integer_range<'a, 'b>(
+        &'a self,
+        addr: &'b Relocatable,
         size: usize,
-    ) -> Result<Vec<Cow<Felt>>, VirtualMachineError> {
+    ) -> Result<Vec<Cow<'a, Felt>>, VirtualMachineError> {
         let mut values = Vec::new();
 
         for i in 0..size {
